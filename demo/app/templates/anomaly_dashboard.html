@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CAS Anomaly Detection Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 1.5rem; background: #0f1419; color: #e6edf3; }
+    h1 { margin-top: 0; font-size: 1.5rem; }
+    .subtitle { color: #8b949e; font-size: 0.9rem; margin-bottom: 1rem; }
+    .status { padding: 0.8rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-weight: 500; }
+    .status.loading { background: #1f6feb33; color: #58a6ff; }
+    .status.done { background: #23863633; color: #3fb950; }
+    .status.anomaly { background: #f8514933; color: #f85149; border: 1px solid #f85149; }
+    .actions { margin-bottom: 1rem; }
+    .actions a, .actions button { color: #58a6ff; text-decoration: none; margin-right: 1rem; background: none; border: none; cursor: pointer; font-size: 1rem; padding: 0; }
+    .actions a:hover, .actions button:hover { text-decoration: underline; }
+    .actions button { font-family: inherit; }
+    table { width: 100%; border-collapse: collapse; background: #161b22; border-radius: 8px; overflow: hidden; }
+    th, td { padding: 0.6rem 0.9rem; text-align: left; border-bottom: 1px solid #21262d; }
+    th { background: #21262d; font-weight: 600; }
+    tr:hover { background: #1c2128; }
+    tr.anomaly-row { background: #f8514915; }
+    .badge { display: inline-block; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; }
+    .badge-anomaly { background: #f85149; color: #fff; }
+    .badge-normal { background: #238636; color: #fff; }
+    .reasons { font-size: 0.8rem; color: #f85149; }
+    .chart-container { max-width: 600px; margin: 2rem 0; padding: 1rem; background: #161b22; border-radius: 8px; }
+    .log { margin-top: 1rem; padding: 0.8rem; background: #161b22; border-radius: 8px; font-size: 0.85rem; font-family: monospace; color: #8b949e; max-height: 120px; overflow-y: auto; }
+    .breakdown { margin-top: 1.5rem; }
+    .breakdown h3 { font-size: 1rem; margin-bottom: 0.5rem; }
+    .breakdown-row { padding: 0.5rem 0.8rem; background: #161b22; border-radius: 6px; margin-bottom: 0.4rem; font-size: 0.85rem; font-family: monospace; }
+    .glossary { margin-top: 1rem; padding: 0.8rem 1rem; background: #161b22; border-radius: 8px; font-size: 0.8rem; color: #8b949e; }
+    .glossary dt { color: #e6edf3; margin-top: 0.3rem; }
+    .tune { margin: 1rem 0; padding: 1rem; background: #161b22; border-radius: 8px; }
+    .tune label { display: inline-block; min-width: 100px; margin-right: 0.5rem; font-size: 0.9rem; }
+    .tune input { width: 80px; padding: 0.3rem; background: #0d1117; border: 1px solid #30363d; color: #e6edf3; border-radius: 4px; }
+    .tune button { margin-left: 0.5rem; padding: 0.3rem 0.8rem; background: #238636; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .tune button:hover { background: #2ea043; }
+  </style>
+</head>
+<body>
+  <h1>CAS Anomaly Detection Dashboard</h1>
+  <p class="subtitle">Uses CAS (λ, σ<sub>λ</sub>, s̄, σ<sub>s</sub>) to flag suspicious patterns. APIs are called automatically to demonstrate anomaly detection.</p>
+  <div class="glossary">
+    <strong>Notation:</strong>
+    <dl style="display:grid;grid-template-columns:auto 1fr;gap:0 1rem;margin:0.3rem 0 0 0;">
+      <dt>λ</dt><dd>frequency — avg requests per time window</dd>
+      <dt>σ<sub>λ</sub></dt><dd>traffic stability — how much request rate varies</dd>
+      <dt>s̄</dt><dd>mean size — avg response size (bytes)</dd>
+      <dt>σ<sub>s</sub></dt><dd>size stability — how much response size varies</dd>
+      <dt>term1</dt><dd>λ / (1 + σ<sub>λ</sub>) — frequency adjusted by stability</dd>
+      <dt>size_benefit</dt><dd>s̄ / (s̄ + S₀) — larger responses score higher</dd>
+      <dt>term3</dt><dd>1 / (1 + σ<sub>s</sub>/S₁) — penalizes variable sizes</dd>
+      <dt>penalty</dt><dd>α × λ × S₀/(s̄ + S₀) — frequent + small responses</dd>
+      <dt>CAS</dt><dd>Cache Admission Score — final value (positive part − penalty)</dd>
+    </dl>
+  </div>
+  <div id="status" class="status loading">Simulating traffic…</div>
+  <div class="tune">
+    <strong>Tune constants (to increase CAS):</strong>
+    <div style="margin-top: 0.5rem;">
+      <label title="penalty weight — lower = less penalty, higher CAS">α</label>
+      <input type="number" id="alpha" min="0.01" max="0.5" step="0.01" value="0.1">
+      <label title="size scale for mean (KB)">S₀ (KB)</label>
+      <input type="number" id="s0_kb" min="1" max="100" step="1" value="10">
+      <label title="size scale for std dev (KB)">S₁ (KB)</label>
+      <input type="number" id="s1_kb" min="1" max="50" step="1" value="5">
+      <label title="window minutes — shorter = more spread">window (min)</label>
+      <input type="number" id="window_min" min="0.01" max="10" step="0.01" value="0.05">
+      <button type="button" id="btnApply">Apply & refresh</button>
+    </div>
+    <p style="font-size:0.75rem;color:#8b949e;margin:0.5rem 0 0 0;">Lower α or S₀ often increases CAS. Shorter windows reduce burstiness.</p>
+  </div>
+  <div class="actions">
+    <button type="button" id="btnSimulate">Simulate again</button>
+    <a href="/anomaly/">Refresh page</a>
+  </div>
+  <div class="chart-container">
+    <canvas id="casChart" width="400" height="200"></canvas>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Path</th>
+        <th title="frequency — avg requests per time window">λ</th>
+        <th title="traffic stability — how much request rate varies">σ<sub>λ</sub></th>
+        <th title="mean size — avg response size (bytes)">Mean size (B)</th>
+        <th title="size stability — how much response size varies">σ<sub>s</sub></th>
+        <th title="Cache Admission Score — final value">CAS</th>
+        <th>Requests</th>
+        <th>Status</th>
+        <th>Reasons</th>
+      </tr>
+    </thead>
+    <tbody id="tableBody">
+      <tr><td colspan="9">Loading…</td></tr>
+    </tbody>
+  </table>
+  <div class="breakdown" id="breakdown">
+    <h3>Formula breakdown: CAS = term1 × size_benefit × term3 − penalty</h3>
+    <p style="font-size:0.8rem;color:#8b949e;margin:0 0 0.5rem 0;">term1 = freq/stability · size_benefit = size factor · term3 = size variance factor · penalty = frequent+small</p>
+    <div id="breakdownBody"></div>
+  </div>
+  <div class="log" id="log">Log will appear here…</div>
+  <script>
+    function log(msg) {
+      const el = document.getElementById('log');
+      el.innerHTML = (new Date().toLocaleTimeString() + ' ' + msg + '<br>') + el.innerHTML;
+    }
+    async function hitApi(url, count) {
+      for (let i = 0; i < count; i++) {
+        await fetch(url);
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+    async function simulateAndLoad() {
+      const statusEl = document.getElementById('status');
+      const tableBody = document.getElementById('tableBody');
+      statusEl.className = 'status loading';
+      statusEl.textContent = 'Simulating traffic…';
+      log('Calling /api/items/ 25 times (normal: larger payload, spread over time)');
+      await hitApi('/api/items/', 25);
+      log('Calling /api/small/ 25 times (anomaly: frequent + small)');
+      await hitApi('/api/small/', 25);
+      log('Calling /api/health/ 25 times (anomaly: frequent + tiny)');
+      await hitApi('/api/health/', 25);
+      log('Fetching anomaly dashboard data…');
+      const params = new URLSearchParams();
+      params.set('alpha', document.getElementById('alpha').value);
+      params.set('s0_kb', document.getElementById('s0_kb').value);
+      params.set('s1_kb', document.getElementById('s1_kb').value);
+      params.set('window_min', document.getElementById('window_min').value);
+      const resp = await fetch('/api/anomaly-dashboard/?' + params.toString());
+      const json = await resp.json();
+      const data = json.endpoints || [];
+      log('Loaded ' + data.length + ' endpoints');
+      statusEl.className = 'status done';
+      const anomalies = data.filter(e => e.anomaly);
+      if (anomalies.length > 0) {
+        statusEl.textContent = anomalies.length + ' anomaly(ies) detected: ' + anomalies.map(e => e.path).join(', ');
+        statusEl.className = 'status anomaly';
+      } else {
+        statusEl.textContent = 'Done. No anomalies detected.';
+      }
+      tableBody.innerHTML = '';
+      if (data.length === 0) {
+        tableBody.innerHTML = '<tr><td colspan="9">No data.</td></tr>';
+      } else {
+        data.forEach(e => {
+          const tr = document.createElement('tr');
+          if (e.anomaly) tr.classList.add('anomaly-row');
+          tr.innerHTML = '<td><code>' + e.path + '</code></td>' +
+            '<td>' + e.lambda + '</td>' +
+            '<td>' + e.sigma_lambda + '</td>' +
+            '<td>' + Math.round(e.mean_size) + '</td>' +
+            '<td>' + Math.round(e.sigma_size) + '</td>' +
+            '<td>' + e.cas + '</td>' +
+            '<td>' + e.total_requests + '</td>' +
+            '<td><span class="badge ' + (e.anomaly ? 'badge-anomaly">ANOMALY' : 'badge-normal">Normal') + '</span></td>' +
+            '<td class="reasons">' + (e.reasons && e.reasons.length ? e.reasons.join(', ') : '—') + '</td>';
+          tableBody.appendChild(tr);
+        });
+        const bEl = document.getElementById('breakdownBody');
+        bEl.innerHTML = '';
+        data.forEach(e => {
+          const b = e.breakdown || {};
+          const s = '<code>' + e.path + '</code>: <span title="frequency adjusted by stability">term1</span>=' + (b.term1 ?? '-') + ', <span title="larger responses score higher">size_benefit</span>=' + (b.size_benefit ?? '-') + ', <span title="penalizes variable sizes">term3</span>=' + (b.term3 ?? '-') + ', <span title="frequent+small penalty">penalty</span>=' + (b.penalty ?? '-') + ' → positive=' + (b.positive ?? '-') + ', raw=' + (b.raw ?? '-') + ', <strong>CAS=' + (b.final ?? e.cas) + '</strong>';
+          const div = document.createElement('div');
+          div.className = 'breakdown-row';
+          div.innerHTML = s;
+          bEl.appendChild(div);
+        });
+      }
+      const ctx = document.getElementById('casChart');
+      const chartEl = ctx.parentNode;
+      const oldCanvas = ctx;
+      const newCanvas = document.createElement('canvas');
+      newCanvas.width = 400;
+      newCanvas.height = 200;
+      chartEl.replaceChild(newCanvas, oldCanvas);
+      if (data.length > 0) {
+        const paths = data.map(e => e.path);
+        const casValues = data.map(e => e.cas);
+        const colors = data.map(e => e.anomaly ? 'rgba(248, 81, 73, 0.8)' : 'rgba(88, 166, 255, 0.6)');
+        new Chart(newCanvas, {
+          type: 'bar',
+          data: {
+            labels: paths,
+            datasets: [{
+              label: 'CAS score (red = anomaly)',
+              data: casValues,
+              backgroundColor: colors,
+              borderColor: data.map(e => e.anomaly ? '#f85149' : '#58a6ff'),
+              borderWidth: 1
+            }]
+          },
+          options: {
+            responsive: true,
+            plugins: { legend: { display: true } },
+            scales: { y: { beginAtZero: true } }
+          }
+        });
+      }
+    }
+    function loadWithTune() {
+      const params = new URLSearchParams();
+      params.set('alpha', document.getElementById('alpha').value);
+      params.set('s0_kb', document.getElementById('s0_kb').value);
+      params.set('s1_kb', document.getElementById('s1_kb').value);
+      params.set('window_min', document.getElementById('window_min').value);
+      return fetch('/api/anomaly-dashboard/?' + params.toString()).then(r => r.json());
+    }
+    document.getElementById('btnSimulate').addEventListener('click', simulateAndLoad);
+    document.getElementById('btnApply').addEventListener('click', async function() {
+      const statusEl = document.getElementById('status');
+      statusEl.className = 'status loading';
+      statusEl.textContent = 'Applying tuned constants…';
+      const json = await loadWithTune();
+      const data = json.endpoints || [];
+      statusEl.className = 'status done';
+      const anomalies = data.filter(e => e.anomaly);
+      if (anomalies.length > 0) {
+        statusEl.textContent = anomalies.length + ' anomaly(ies) detected.';
+        statusEl.className = 'status anomaly';
+      } else {
+        statusEl.textContent = 'Done. No anomalies detected.';
+      }
+      const tableBody = document.getElementById('tableBody');
+      tableBody.innerHTML = data.length ? '' : '<tr><td colspan="9">No data. Run Simulate first.</td></tr>';
+      data.forEach(e => {
+        const tr = document.createElement('tr');
+        if (e.anomaly) tr.classList.add('anomaly-row');
+        tr.innerHTML = '<td><code>' + e.path + '</code></td><td>' + e.lambda + '</td><td>' + e.sigma_lambda + '</td><td>' + Math.round(e.mean_size) + '</td><td>' + Math.round(e.sigma_size) + '</td><td>' + e.cas + '</td><td>' + e.total_requests + '</td><td><span class="badge ' + (e.anomaly ? 'badge-anomaly">ANOMALY' : 'badge-normal">Normal') + '</span></td><td class="reasons">' + (e.reasons && e.reasons.length ? e.reasons.join(', ') : '—') + '</td>';
+        tableBody.appendChild(tr);
+      });
+      const bEl = document.getElementById('breakdownBody');
+      bEl.innerHTML = '';
+      data.forEach(e => {
+        const b = e.breakdown || {};
+        const s = '<code>' + e.path + '</code>: term1=' + (b.term1 ?? '-') + ', size_benefit=' + (b.size_benefit ?? '-') + ', term3=' + (b.term3 ?? '-') + ', penalty=' + (b.penalty ?? '-') + ' → positive=' + (b.positive ?? '-') + ', raw=' + (b.raw ?? '-') + ', <strong>CAS=' + (b.final ?? e.cas) + '</strong>';
+        const div = document.createElement('div');
+        div.className = 'breakdown-row';
+        div.innerHTML = s;
+        bEl.appendChild(div);
+      });
+      const ctx = document.getElementById('casChart');
+      const chartEl = ctx.parentNode;
+      const newCanvas = document.createElement('canvas');
+      newCanvas.width = 400;
+      newCanvas.height = 200;
+      chartEl.replaceChild(newCanvas, ctx);
+      if (data.length > 0) {
+        new Chart(newCanvas, {
+          type: 'bar',
+          data: {
+            labels: data.map(x => x.path),
+            datasets: [{ label: 'CAS', data: data.map(x => x.cas), backgroundColor: data.map(e => e.anomaly ? 'rgba(248,81,73,0.8)' : 'rgba(88,166,255,0.6)') }]
+          },
+          options: { responsive: true, scales: { y: { beginAtZero: true } } }
+        });
+      }
+    });
+    simulateAndLoad();
+  </script>
+</body>
+</html>
